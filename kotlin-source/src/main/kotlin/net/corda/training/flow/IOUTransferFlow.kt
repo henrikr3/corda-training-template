@@ -1,8 +1,7 @@
 package net.corda.training.flow
 
 import co.paralleluniverse.fibers.Suspendable
-import net.corda.core.contracts.UniqueIdentifier
-import net.corda.core.contracts.requireThat
+import net.corda.core.contracts.*
 import net.corda.core.flows.CollectSignaturesFlow
 import net.corda.core.flows.FinalityFlow
 import net.corda.core.flows.FlowLogic
@@ -12,8 +11,11 @@ import net.corda.core.flows.InitiatingFlow
 import net.corda.core.flows.SignTransactionFlow
 import net.corda.core.flows.StartableByRPC
 import net.corda.core.identity.Party
+import net.corda.core.node.services.queryBy
+import net.corda.core.node.services.vault.QueryCriteria
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.TransactionBuilder
+import net.corda.training.contract.IOUContract
 import net.corda.training.state.IOUState
 
 /**
@@ -28,9 +30,27 @@ class IOUTransferFlow(val linearId: UniqueIdentifier, val newLender: Party): Flo
     @Suspendable
     override fun call(): SignedTransaction {
         // Placeholder code to avoid type error when running the tests. Remove before starting the flow task!
-        return serviceHub.signInitialTransaction(
-                TransactionBuilder(notary = null)
-        )
+        val queryCriteria = QueryCriteria.LinearStateQueryCriteria(linearId = listOf(linearId))
+        val iouStateAndRef = serviceHub.vaultService.queryBy<IOUState>(queryCriteria).states.single()
+        val state = iouStateAndRef.state.data
+        val stateWithNewLender = state.withNewLender(newLender)
+
+        if(state.lender != ourIdentity) {
+            throw java.lang.IllegalArgumentException("Only lender can execute this flow!")
+        }
+
+        val notary = this.serviceHub.networkMapCache.notaryIdentities.single()
+        val command = Command(IOUContract.Commands.Transfer(), (state.participants + newLender).map { it.owningKey })
+
+        val transactionBuilder = TransactionBuilder(notary).withItems(iouStateAndRef, command,
+                StateAndContract(stateWithNewLender, IOUContract.IOU_CONTRACT_ID))
+
+        transactionBuilder.verify(serviceHub)
+        val signedTransaction = serviceHub.signInitialTransaction(transactionBuilder)
+        val sessionsToCollectFrom = (state.participants - ourIdentity + newLender).asSequence().map { initiateFlow(it) }.toSet()
+        val stx = subFlow(CollectSignaturesFlow(signedTransaction, sessionsToCollectFrom))
+
+        return subFlow(FinalityFlow(stx))
     }
 }
 

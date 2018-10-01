@@ -1,7 +1,7 @@
 package net.corda.training.flow
 
 import co.paralleluniverse.fibers.Suspendable
-import net.corda.core.contracts.requireThat
+import net.corda.core.contracts.*
 import net.corda.core.flows.CollectSignaturesFlow
 import net.corda.core.flows.FinalityFlow
 import net.corda.core.flows.FlowLogic
@@ -12,6 +12,7 @@ import net.corda.core.flows.SignTransactionFlow
 import net.corda.core.flows.StartableByRPC
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.TransactionBuilder
+import net.corda.training.contract.IOUContract
 import net.corda.training.state.IOUState
 
 /**
@@ -26,9 +27,28 @@ class IOUIssueFlow(val state: IOUState) : FlowLogic<SignedTransaction>() {
     @Suspendable
     override fun call(): SignedTransaction {
         // Placeholder code to avoid type error when running the tests. Remove before starting the flow task!
-        return serviceHub.signInitialTransaction(
-                TransactionBuilder(notary = null)
-        )
+        val notary = this.serviceHub.networkMapCache.notaryIdentities.single()
+        val command = Command(IOUContract.Commands.Issue(), state.participants.map { it.owningKey })
+
+        val transactionBuilder1 = TransactionBuilder(notary)
+        transactionBuilder1.addCommand(command)
+        transactionBuilder1.addOutputState(state, IOUContract.IOU_CONTRACT_ID)
+
+        val transactionBuilder2 = TransactionBuilder(notary).withItems(command,
+                StateAndContract(state, IOUContract.IOU_CONTRACT_ID))
+
+        transactionBuilder1.verify(serviceHub)
+        transactionBuilder2.verify(serviceHub)
+        val signedTransaction1 = serviceHub.signInitialTransaction(transactionBuilder1)
+        val signedTransaction2 = serviceHub.signInitialTransaction(transactionBuilder2)
+        requireThat { "Signed transaction creation methods should be identical" using
+                (signedTransaction1.notary == signedTransaction2.notary &&
+                        signedTransaction1.inputs == signedTransaction2.inputs) }
+
+        val sessionsToCollectFrom = (state.participants - ourIdentity).asSequence().map { initiateFlow(it) }.toSet()
+        val stx = subFlow(CollectSignaturesFlow(signedTransaction2, sessionsToCollectFrom))
+
+        return subFlow(FinalityFlow(stx))
     }
 }
 
